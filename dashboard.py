@@ -102,6 +102,26 @@ def _parse_ts(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
+TS_FMT = "%m/%d/%Y %I:%M:%S %p"   # e.g. 04/17/2026 05:23:41 PM
+
+
+def fmt_ts(ts: datetime) -> str:
+    """Format a timestamp in 12-hour clock with seconds."""
+    if ts is None or pd.isna(ts):
+        return ""
+    return pd.Timestamp(ts).strftime(TS_FMT)
+
+
+def fmt_duration(minutes: float) -> str:
+    """Format a duration in minutes as H:MM:SS."""
+    if minutes is None or pd.isna(minutes):
+        return ""
+    total = int(round(float(minutes) * 60))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Core analysis
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,10 +183,13 @@ def compute_gaps(picks: pd.DataFrame, stages: pd.DataFrame) -> dict[str, pd.Data
             raw, brk, adj = adjusted_minutes(a, b)
             if adj > GAP_THRESHOLD_MIN:
                 pp_rows.append({
-                    "User": user, "From": a, "To": b,
-                    "Raw Min": round(raw, 1),
-                    "Break Min": round(brk, 1),
-                    "Adj Min": round(adj, 1),
+                    "User": user,
+                    "From": fmt_ts(a),
+                    "To": fmt_ts(b),
+                    "Raw": fmt_duration(raw),
+                    "Break": fmt_duration(brk),
+                    "Adjusted": fmt_duration(adj),
+                    "Adj Min": round(adj, 2),
                 })
 
     # Pick → Stage and Stage → Pick (per user, by interleaved timeline)
@@ -185,19 +208,25 @@ def compute_gaps(picks: pd.DataFrame, stages: pd.DataFrame) -> dict[str, pd.Data
                 raw, brk, adj = adjusted_minutes(last_pick, ts)
                 if adj > GAP_THRESHOLD_MIN:
                     ps_rows.append({
-                        "User": user, "Pick Time": last_pick, "Stage Time": ts,
-                        "Raw Min": round(raw, 1),
-                        "Break Min": round(brk, 1),
-                        "Adj Min": round(adj, 1),
+                        "User": user,
+                        "Pick Time": fmt_ts(last_pick),
+                        "Stage Time": fmt_ts(ts),
+                        "Raw": fmt_duration(raw),
+                        "Break": fmt_duration(brk),
+                        "Adjusted": fmt_duration(adj),
+                        "Adj Min": round(adj, 2),
                     })
             elif kind == "pick" and last_stage is not None:
                 raw, brk, adj = adjusted_minutes(last_stage, ts)
                 if adj > GAP_THRESHOLD_MIN:
                     sp_rows.append({
-                        "User": user, "Stage Time": last_stage, "Pick Time": ts,
-                        "Raw Min": round(raw, 1),
-                        "Break Min": round(brk, 1),
-                        "Adj Min": round(adj, 1),
+                        "User": user,
+                        "Stage Time": fmt_ts(last_stage),
+                        "Pick Time": fmt_ts(ts),
+                        "Raw": fmt_duration(raw),
+                        "Break": fmt_duration(brk),
+                        "Adjusted": fmt_duration(adj),
+                        "Adj Min": round(adj, 2),
                     })
             if kind == "pick":
                 last_pick = ts
@@ -212,19 +241,21 @@ def compute_gaps(picks: pd.DataFrame, stages: pd.DataFrame) -> dict[str, pd.Data
 
 
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["User", "Gaps", "Total", "Average", "Max"]
     if df.empty:
-        return pd.DataFrame(columns=["User", "Gaps", "Total Adj Min", "Avg Adj Min", "Max Adj Min"])
+        return pd.DataFrame(columns=cols)
     g = df.groupby("User")["Adj Min"]
-    return (
-        pd.DataFrame({
-            "Gaps": g.size(),
-            "Total Adj Min": g.sum().round(1),
-            "Avg Adj Min": g.mean().round(1),
-            "Max Adj Min": g.max().round(1),
-        })
-        .reset_index()
-        .sort_values("Total Adj Min", ascending=False)
-    )
+    out = pd.DataFrame({
+        "Gaps": g.size(),
+        "_total": g.sum(),
+        "_avg": g.mean(),
+        "_max": g.max(),
+    }).reset_index()
+    out = out.sort_values("_total", ascending=False)
+    out["Total"] = out["_total"].apply(fmt_duration)
+    out["Average"] = out["_avg"].apply(fmt_duration)
+    out["Max"] = out["_max"].apply(fmt_duration)
+    return out[cols]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -294,11 +325,12 @@ def _render(df: pd.DataFrame, label: str) -> None:
         st.success(f"No {label} gaps over {GAP_THRESHOLD_MIN:.0f} minutes.")
         return
     st.write(f"**{len(df):,} gaps** over {GAP_THRESHOLD_MIN:.0f} minutes (after breaks).")
-    st.dataframe(
-        df.sort_values("Adj Min", ascending=False).reset_index(drop=True),
-        use_container_width=True,
-        height=500,
+    display_df = (
+        df.sort_values("Adj Min", ascending=False)
+          .drop(columns=["Adj Min"])
+          .reset_index(drop=True)
     )
+    st.dataframe(display_df, use_container_width=True, height=500)
     st.download_button(
         f"Download {label} CSV",
         df.to_csv(index=False).encode("utf-8"),
