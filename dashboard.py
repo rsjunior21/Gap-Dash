@@ -38,11 +38,24 @@ BREAKS: list[tuple[time, time]] = [
     (time(0,  0),  time(0, 50)),
 ]
 
-# Columns we read out of the workbook
-COL_PICK_TIME  = "Pick Completed At"
-COL_PICK_USER  = "Picked By"
-COL_STAGE_TIME = "Stage Completed At"
-COL_STAGE_USER = "Staged By"
+# Two supported workbook layouts:
+#
+# 1) Wide "report" layout — one row per order, separate pick/stage columns:
+WIDE_COLS = {
+    "pick_time":  "Pick Completed At",
+    "pick_user":  "Picked By",
+    "stage_time": "Stage Completed At",
+    "stage_user": "Staged By",
+}
+#
+# 2) Long "transaction log" layout — one row per event:
+LONG_COLS = {
+    "time":   "Transaction Time",
+    "type":   "Transaction",        # values like "Order Pick", "Order Stage"
+    "user":   "Created By",
+}
+LONG_PICK_VALUES  = {"order pick", "pick"}
+LONG_STAGE_VALUES = {"order stage", "stage"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -93,28 +106,48 @@ def _parse_ts(series: pd.Series) -> pd.Series:
 # Core analysis
 # ──────────────────────────────────────────────────────────────────────────────
 def load_events(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Pull pick + stage events out of the raw report DataFrame."""
-    missing = [c for c in (COL_PICK_TIME, COL_PICK_USER, COL_STAGE_TIME, COL_STAGE_USER)
-               if c not in df.columns]
-    if missing:
-        raise ValueError(
-            "Workbook is missing required columns: " + ", ".join(missing) +
-            "\nExpected the standard pick/stage report layout."
-        )
+    """Pull pick + stage events out of the raw report DataFrame.
 
-    picks = pd.DataFrame({
-        "time": _parse_ts(df[COL_PICK_TIME]),
-        "user": df[COL_PICK_USER].astype(str).str.strip(),
-    }).dropna(subset=["time"])
-    picks = picks[picks["user"].ne("") & picks["user"].str.lower().ne("nan")]
+    Auto-detects the wide pick/stage report layout vs. the long transaction-log
+    layout (one row per event with a `Transaction` column).
+    """
+    cols = set(df.columns)
 
-    stages = pd.DataFrame({
-        "time": _parse_ts(df[COL_STAGE_TIME]),
-        "user": df[COL_STAGE_USER].astype(str).str.strip(),
-    }).dropna(subset=["time"])
-    stages = stages[stages["user"].ne("") & stages["user"].str.lower().ne("nan")]
+    # ── Long / transaction-log layout ────────────────────────────────────────
+    if {LONG_COLS["time"], LONG_COLS["type"], LONG_COLS["user"]}.issubset(cols):
+        t = df[LONG_COLS["type"]].astype(str).str.strip().str.lower()
+        base = pd.DataFrame({
+            "time": _parse_ts(df[LONG_COLS["time"]]),
+            "user": df[LONG_COLS["user"]].astype(str).str.strip(),
+            "type": t,
+        }).dropna(subset=["time"])
+        base = base[base["user"].ne("") & base["user"].str.lower().ne("nan")]
 
-    return picks.sort_values("time"), stages.sort_values("time")
+        picks = base[base["type"].isin(LONG_PICK_VALUES)][["time", "user"]]
+        stages = base[base["type"].isin(LONG_STAGE_VALUES)][["time", "user"]]
+        return picks.sort_values("time"), stages.sort_values("time")
+
+    # ── Wide pick/stage report layout ────────────────────────────────────────
+    if {WIDE_COLS["pick_time"], WIDE_COLS["pick_user"],
+        WIDE_COLS["stage_time"], WIDE_COLS["stage_user"]}.issubset(cols):
+        picks = pd.DataFrame({
+            "time": _parse_ts(df[WIDE_COLS["pick_time"]]),
+            "user": df[WIDE_COLS["pick_user"]].astype(str).str.strip(),
+        }).dropna(subset=["time"])
+        picks = picks[picks["user"].ne("") & picks["user"].str.lower().ne("nan")]
+
+        stages = pd.DataFrame({
+            "time": _parse_ts(df[WIDE_COLS["stage_time"]]),
+            "user": df[WIDE_COLS["stage_user"]].astype(str).str.strip(),
+        }).dropna(subset=["time"])
+        stages = stages[stages["user"].ne("") & stages["user"].str.lower().ne("nan")]
+        return picks.sort_values("time"), stages.sort_values("time")
+
+    raise ValueError(
+        "Couldn't detect a supported layout. Expected either:\n"
+        f"  • Long format columns: {list(LONG_COLS.values())}\n"
+        f"  • Wide format columns: {list(WIDE_COLS.values())}"
+    )
 
 
 def compute_gaps(picks: pd.DataFrame, stages: pd.DataFrame) -> dict[str, pd.DataFrame]:
